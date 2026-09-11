@@ -1,0 +1,646 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Brocantes & Vide-Greniers — Carte de France</title>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css" />
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: #1a1a2e; color: #eee; }
+
+        /* ── Header ── */
+        .header {
+            height: 50px;
+            background: linear-gradient(135deg, #16213e 0%, #0f3460 100%);
+            display: flex;
+            align-items: center;
+            padding: 0 16px;
+            border-bottom: 2px solid #e94560;
+            gap: 12px;
+        }
+        .header h1 { font-size: 1em; font-weight: 600; color: #fff; white-space: nowrap; }
+        .header h1 span { color: #e94560; }
+
+        .search-bar {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            flex: 1;
+            max-width: 520px;
+        }
+        .search-bar input[type="text"] {
+            flex: 1;
+            padding: 6px 12px;
+            border-radius: 8px;
+            border: 1px solid rgba(233,69,96,0.4);
+            background: rgba(255,255,255,0.08);
+            color: #fff;
+            font-size: 0.88em;
+            outline: none;
+        }
+        .search-bar input[type="text"]:focus { border-color: #e94560; background: rgba(255,255,255,0.12); }
+        .search-bar input[type="text"]::placeholder { color: #888; }
+        .radius-ctrl { display: flex; align-items: center; gap: 4px; white-space: nowrap; font-size: 0.82em; }
+        .radius-ctrl input[type="range"] { width: 80px; accent-color: #e94560; }
+        .btn-search {
+            padding: 6px 14px; background: #e94560; border: none; border-radius: 8px;
+            color: #fff; font-weight: 600; cursor: pointer; font-size: 0.85em; white-space: nowrap;
+        }
+        .btn-search:hover { background: #c73750; }
+        .stat-badge {
+            background: rgba(255,255,255,0.1); padding: 4px 12px; border-radius: 20px;
+            font-size: 0.82em; white-space: nowrap; margin-left: auto;
+        }
+
+        /* ── Date bar ── */
+        .date-bar {
+            display: none;
+            height: 38px;
+            background: #16213e;
+            align-items: center;
+            padding: 0 12px;
+            gap: 6px;
+            overflow-x: auto;
+            border-bottom: 1px solid rgba(233,69,96,0.2);
+        }
+        .date-bar.active { display: flex; }
+        .date-btn {
+            padding: 5px 14px;
+            border-radius: 20px;
+            border: 1px solid rgba(255,255,255,0.15);
+            background: transparent;
+            color: #aaa;
+            font-size: 0.8em;
+            cursor: pointer;
+            white-space: nowrap;
+            transition: all 0.15s;
+            font-weight: 500;
+        }
+        .date-btn:hover { border-color: rgba(233,69,96,0.5); color: #fff; }
+        .date-btn.active {
+            background: #e94560;
+            border-color: #e94560;
+            color: #fff;
+            font-weight: 700;
+        }
+        .date-btn .count {
+            font-size: 0.85em;
+            opacity: 0.7;
+            margin-left: 2px;
+        }
+
+        /* ── Map ── */
+        #map { width: 100%; height: calc(100vh - 50px); }
+        body.has-datebar #map { height: calc(100vh - 88px); }
+
+        /* ── Filter panel ── */
+        .panel {
+            position: absolute;
+            top: 8px;
+            right: 12px;
+            z-index: 1000;
+            background: rgba(22, 33, 62, 0.96);
+            border-radius: 12px;
+            padding: 14px 16px;
+            border: 1px solid rgba(233, 69, 96, 0.3);
+            box-shadow: 0 4px 20px rgba(0,0,0,0.5);
+            min-width: 190px;
+            max-height: calc(100vh - 140px);
+            overflow-y: auto;
+            display: none;
+        }
+        .panel.active { display: block; }
+        .panel h3 { font-size: 0.72em; margin-bottom: 6px; color: #e94560; text-transform: uppercase; letter-spacing: 1px; }
+        .panel label { display: flex; align-items: center; gap: 6px; font-size: 0.8em; cursor: pointer; padding: 2px 0; }
+        .panel input[type="checkbox"] { accent-color: #e94560; }
+        .panel .dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; }
+        .panel hr { border: none; border-top: 1px solid rgba(233,69,96,0.2); margin: 8px 0; }
+
+        .btn-float {
+            position: absolute;
+            z-index: 999;
+            background: rgba(22, 33, 62, 0.96);
+            border: 1px solid rgba(233, 69, 96, 0.3);
+            color: #fff;
+            padding: 8px 14px;
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 0.82em;
+        }
+        .btn-float:hover { background: rgba(233, 69, 96, 0.3); }
+        .btn-filters { top: 8px; right: 12px; }
+        .btn-list { top: 8px; left: 12px; }
+
+        /* ── List panel ── */
+        .list-panel {
+            position: absolute;
+            top: 8px;
+            left: 12px;
+            z-index: 1000;
+            background: rgba(22, 33, 62, 0.96);
+            border-radius: 12px;
+            padding: 14px;
+            border: 1px solid rgba(233, 69, 96, 0.3);
+            box-shadow: 0 4px 20px rgba(0,0,0,0.5);
+            max-width: 340px;
+            max-height: calc(100vh - 140px);
+            overflow-y: auto;
+            display: none;
+        }
+        .list-panel.active { display: block; }
+        .list-panel h3 {
+            font-size: 0.82em; color: #e94560; text-transform: uppercase; letter-spacing: 1px;
+            position: sticky; top: 0; background: rgba(22, 33, 62, 1); padding: 4px 0 8px; z-index: 1;
+        }
+        .list-item {
+            padding: 8px 10px; margin: 3px 0; background: rgba(255,255,255,0.04); border-radius: 8px;
+            cursor: pointer; transition: all 0.15s; font-size: 0.78em; border-left: 3px solid transparent;
+        }
+        .list-item:hover { background: rgba(233, 69, 96, 0.12); border-left-color: #e94560; }
+        .list-item .li-name { font-weight: 600; color: #fff; }
+        .list-item .li-city { color: #aaa; font-size: 0.9em; }
+        .list-item .li-meta { color: #e94560; font-size: 0.85em; }
+
+        /* ── Welcome overlay ── */
+        .welcome {
+            position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+            z-index: 1500; background: rgba(22, 33, 62, 0.97); border: 1px solid rgba(233, 69, 96, 0.4);
+            border-radius: 16px; padding: 32px 40px; text-align: center;
+            box-shadow: 0 8px 40px rgba(0,0,0,0.6); max-width: 420px; width: 90%;
+        }
+        .welcome h2 { font-size: 1.3em; margin-bottom: 6px; }
+        .welcome h2 span { color: #e94560; }
+        .welcome p { font-size: 0.88em; color: #aaa; margin: 10px 0 20px; line-height: 1.5; }
+        .welcome .search-inline { display: flex; flex-direction: column; gap: 10px; }
+        .welcome .search-inline input[type="text"] {
+            padding: 10px 14px; border-radius: 8px; border: 1px solid rgba(233,69,96,0.4);
+            background: rgba(255,255,255,0.08); color: #fff; font-size: 0.95em; outline: none; text-align: center;
+        }
+        .welcome .search-inline input:focus { border-color: #e94560; }
+        .welcome .search-inline input::placeholder { color: #666; }
+        .welcome .radius-row { display: flex; align-items: center; justify-content: center; gap: 10px; font-size: 0.9em; }
+        .welcome .radius-row input[type="range"] { width: 140px; accent-color: #e94560; }
+        .welcome .btn-go {
+            padding: 10px 24px; background: #e94560; border: none; border-radius: 8px;
+            color: #fff; font-weight: 700; cursor: pointer; font-size: 1em;
+        }
+        .welcome .btn-go:hover { background: #c73750; }
+        .welcome .btn-go:disabled { opacity: 0.5; cursor: not-allowed; }
+        .welcome .ac-results { text-align: left; max-height: 160px; overflow-y: auto; }
+        .welcome .ac-results div { padding: 6px 10px; cursor: pointer; border-radius: 6px; font-size: 0.88em; }
+        .welcome .ac-results div:hover { background: rgba(233,69,96,0.15); }
+        .welcome .freshness { font-size: 0.75em; color: #555; margin-top: 14px; }
+
+        /* ── Loading ── */
+        .loading { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); z-index: 1500; color: #e94560; font-size: 1.1em; display: none; }
+
+        /* ── Leaflet popups ── */
+        .leaflet-popup-content-wrapper {
+            background: rgba(22, 33, 62, 0.98) !important; color: #eee !important;
+            border-radius: 12px !important; border: 1px solid rgba(233, 69, 96, 0.4) !important;
+            box-shadow: 0 4px 25px rgba(0,0,0,0.5) !important;
+        }
+        .leaflet-popup-tip { background: rgba(22, 33, 62, 0.98) !important; }
+        .leaflet-popup-content { margin: 12px 16px !important; min-width: 250px !important; }
+        .leaflet-popup-close-button { color: #e94560 !important; font-size: 20px !important; }
+        .popup-title { font-size: 1.05em; font-weight: 700; color: #fff; margin-bottom: 6px; padding-bottom: 6px; border-bottom: 1px solid rgba(233,69,96,0.3); }
+        .popup-badge { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 0.7em; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 6px; }
+        .popup-info { font-size: 0.84em; line-height: 1.6; color: #ccc; }
+        .popup-info strong { color: #e94560; }
+        .popup-link { display: inline-block; margin-top: 8px; padding: 5px 12px; background: #e94560; color: #fff; text-decoration: none; border-radius: 6px; font-size: 0.78em; font-weight: 600; }
+        .popup-link:hover { background: #c73750; }
+
+        /* Scrollbars */
+        .list-panel::-webkit-scrollbar, .panel::-webkit-scrollbar { width: 5px; }
+        .list-panel::-webkit-scrollbar-track, .panel::-webkit-scrollbar-track { background: transparent; }
+        .list-panel::-webkit-scrollbar-thumb, .panel::-webkit-scrollbar-thumb { background: rgba(233,69,96,0.4); border-radius: 3px; }
+        .date-bar::-webkit-scrollbar { height: 3px; }
+        .date-bar::-webkit-scrollbar-thumb { background: rgba(233,69,96,0.3); border-radius: 2px; }
+
+        @media (max-width: 600px) {
+            .header { flex-wrap: wrap; height: auto; padding: 8px 12px; gap: 6px; }
+            .header h1 { font-size: 0.85em; }
+            .search-bar { max-width: 100%; order: 3; width: 100%; }
+            .stat-badge { display: none; }
+            .panel { right: 8px; min-width: 170px; padding: 10px; }
+            .list-panel { max-width: 250px; }
+            .welcome { padding: 24px 20px; }
+            .date-btn { padding: 4px 10px; font-size: 0.75em; }
+        }
+    </style>
+</head>
+<body>
+
+<div class="header">
+    <h1>Brocantes <span>Carte</span></h1>
+    <div class="search-bar" id="headerSearch" style="display:none">
+        <input type="text" id="searchInput" placeholder="Ville..." autocomplete="off">
+        <div class="radius-ctrl">
+            <input type="range" id="radiusRange" min="5" max="150" value="50" step="5">
+            <span id="radiusLabel">50km</span>
+        </div>
+        <button class="btn-search" id="btnSearch">Chercher</button>
+    </div>
+    <div class="stat-badge" id="stats" style="display:none">
+        <span id="countVisible">0</span> / <span id="countTotal">0</span>
+    </div>
+</div>
+
+<!-- Date bar: pills per day -->
+<div class="date-bar" id="dateBar"></div>
+
+<div id="map"></div>
+
+<!-- Welcome screen -->
+<div class="welcome" id="welcome">
+    <h2>Brocantes <span>Carte</span></h2>
+    <p>Trouve les brocantes et vide-greniers pres de chez toi dans les 14 prochains jours.</p>
+    <div class="search-inline">
+        <input type="text" id="welcomeCity" placeholder="Entre ta ville..." autocomplete="off">
+        <div class="ac-results" id="welcomeAC"></div>
+        <div class="radius-row">
+            Rayon :
+            <input type="range" id="welcomeRadius" min="5" max="150" value="50" step="5">
+            <span id="welcomeRadiusLabel">50 km</span>
+        </div>
+        <button class="btn-go" id="btnGo" disabled>Voir la carte</button>
+        <div class="freshness" id="freshness"></div>
+    </div>
+</div>
+
+<div class="loading" id="loading">Chargement des donnees...</div>
+
+<button class="btn-float btn-list" id="btnList" style="display:none">Liste</button>
+<div class="list-panel" id="listPanel"></div>
+
+<button class="btn-float btn-filters" id="btnFilters" style="display:none">Filtres</button>
+<div class="panel" id="filterPanel"></div>
+
+<script>
+// ── State ──
+let ALL_EVENTS = [];
+let center = null;
+let radius = 50;
+let selectedDate = null; // null = all dates
+let markers = [];
+let radiusCircle = null;
+let centerMarker = null;
+
+const TYPE_COLORS = {
+    'brocante':      { color: '#eab308', label: 'Brocante' },
+    'vide-greniers': { color: '#10b981', label: 'Vide-greniers' },
+    'vide-maison':   { color: '#3b82f6', label: 'Vide-maison' },
+    'foire':         { color: '#f97316', label: 'Foire' },
+    'braderie':      { color: '#ec4899', label: 'Braderie' },
+    'vide-dressing': { color: '#a855f7', label: 'Vide-dressing' },
+};
+
+const DAY_NAMES = ['Dim', 'Lun', 'Mar', 'Mer', 'Jeu', 'Ven', 'Sam'];
+const DAY_FULL = ['Dimanche', 'Lundi', 'Mardi', 'Mercredi', 'Jeudi', 'Vendredi', 'Samedi'];
+const MONTH_NAMES = ['jan', 'fev', 'mar', 'avr', 'mai', 'jun', 'jul', 'aou', 'sep', 'oct', 'nov', 'dec'];
+
+function dateLabel(iso) {
+    const d = new Date(iso + 'T00:00:00');
+    return `${DAY_NAMES[d.getDay()]} ${d.getDate()} ${MONTH_NAMES[d.getMonth()]}`;
+}
+function dateLabelShort(iso) {
+    const d = new Date(iso + 'T00:00:00');
+    return `${DAY_NAMES[d.getDay()]} ${d.getDate()}`;
+}
+
+// ── Map init ──
+const map = L.map('map', { zoomControl: true }).setView([46.8, 2.3], 6);
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OSM</a>',
+    maxZoom: 19
+}).addTo(map);
+
+// ── Haversine ──
+function haversine(lat1, lon1, lat2, lon2) {
+    const R = 6371;
+    const dLat = (lat2 - lat1) * Math.PI / 180;
+    const dLon = (lon2 - lon1) * Math.PI / 180;
+    const a = Math.sin(dLat/2)**2 + Math.cos(lat1*Math.PI/180) * Math.cos(lat2*Math.PI/180) * Math.sin(dLon/2)**2;
+    return R * 2 * Math.asin(Math.sqrt(a));
+}
+
+// ── Load events.json ──
+async function loadEvents() {
+    document.getElementById('loading').style.display = 'block';
+    try {
+        const resp = await fetch('events.json');
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        const data = await resp.json();
+        ALL_EVENTS = data.events || [];
+        const scraped = data.scraped_at ? new Date(data.scraped_at) : null;
+        if (scraped) {
+            document.getElementById('freshness').textContent =
+                `Donnees du ${scraped.toLocaleDateString('fr-FR')} a ${scraped.toLocaleTimeString('fr-FR', {hour:'2-digit', minute:'2-digit'})} — ${ALL_EVENTS.length} evenements`;
+        }
+    } catch (e) {
+        document.getElementById('freshness').textContent = 'Erreur de chargement des donnees.';
+        console.error(e);
+    }
+    document.getElementById('loading').style.display = 'none';
+}
+
+// ── Geocode ──
+let acTimeout = null;
+async function geocodeSearch(query) {
+    if (query.length < 2) return [];
+    const url = `https://api-adresse.data.gouv.fr/search/?q=${encodeURIComponent(query)}&type=municipality&limit=6`;
+    try {
+        const resp = await fetch(url);
+        const data = await resp.json();
+        return (data.features || []).map(f => ({
+            name: f.properties.label,
+            lat: f.geometry.coordinates[1],
+            lon: f.geometry.coordinates[0],
+        }));
+    } catch { return []; }
+}
+
+// ── Welcome screen ──
+const welcomeInput = document.getElementById('welcomeCity');
+const welcomeAC = document.getElementById('welcomeAC');
+const btnGo = document.getElementById('btnGo');
+
+welcomeInput.addEventListener('input', () => {
+    clearTimeout(acTimeout);
+    acTimeout = setTimeout(async () => {
+        const results = await geocodeSearch(welcomeInput.value);
+        welcomeAC.innerHTML = '';
+        if (!results.length) { welcomeAC.style.display = 'none'; return; }
+        results.forEach(r => {
+            const div = document.createElement('div');
+            div.textContent = r.name;
+            div.onclick = () => {
+                center = { lat: r.lat, lon: r.lon, name: r.name };
+                welcomeInput.value = r.name;
+                welcomeAC.style.display = 'none';
+                btnGo.disabled = false;
+            };
+            welcomeAC.appendChild(div);
+        });
+        welcomeAC.style.display = 'block';
+    }, 250);
+});
+
+document.getElementById('welcomeRadius').addEventListener('input', e => {
+    radius = parseInt(e.target.value);
+    document.getElementById('welcomeRadiusLabel').textContent = radius + ' km';
+});
+
+btnGo.addEventListener('click', () => {
+    if (!center) return;
+    document.getElementById('welcome').style.display = 'none';
+    startMap();
+});
+
+welcomeInput.addEventListener('keydown', async e => {
+    if (e.key === 'Enter') {
+        if (!center) {
+            const results = await geocodeSearch(welcomeInput.value);
+            if (results.length) {
+                center = { lat: results[0].lat, lon: results[0].lon, name: results[0].name };
+                welcomeInput.value = results[0].name;
+                welcomeAC.style.display = 'none';
+                btnGo.disabled = false;
+            }
+        }
+        if (center) {
+            document.getElementById('welcome').style.display = 'none';
+            startMap();
+        }
+    }
+});
+
+// ── Header search ──
+const headerInput = document.getElementById('searchInput');
+const headerRadius = document.getElementById('radiusRange');
+
+headerRadius.addEventListener('input', () => {
+    radius = parseInt(headerRadius.value);
+    document.getElementById('radiusLabel').textContent = radius + 'km';
+    updateMap();
+});
+
+document.getElementById('btnSearch').addEventListener('click', async () => {
+    const q = headerInput.value.trim();
+    if (!q) return;
+    const results = await geocodeSearch(q);
+    if (results.length) {
+        center = { lat: results[0].lat, lon: results[0].lon, name: results[0].name };
+        headerInput.value = results[0].name;
+        radius = parseInt(headerRadius.value);
+        selectedDate = null;
+        updateMap();
+    }
+});
+
+headerInput.addEventListener('keydown', e => {
+    if (e.key === 'Enter') document.getElementById('btnSearch').click();
+});
+
+// ── Start map ──
+function startMap() {
+    document.getElementById('headerSearch').style.display = 'flex';
+    document.getElementById('stats').style.display = 'block';
+    document.getElementById('btnList').style.display = 'block';
+    document.getElementById('btnFilters').style.display = 'block';
+    document.getElementById('dateBar').classList.add('active');
+    document.body.classList.add('has-datebar');
+
+    headerInput.value = center.name;
+    headerRadius.value = radius;
+    document.getElementById('radiusLabel').textContent = radius + 'km';
+
+    selectedDate = null;
+    updateMap();
+}
+
+// ── Get events in radius ──
+function getEventsInRadius() {
+    if (!center) return [];
+    return ALL_EVENTS.map(ev => ({
+        ...ev,
+        distance: Math.round(haversine(center.lat, center.lon, ev.lat, ev.lon))
+    })).filter(ev => ev.distance <= radius);
+}
+
+// ── Apply all filters ──
+function getVisible(eventsInRadius) {
+    let events = eventsInRadius;
+
+    // Date filter
+    if (selectedDate) {
+        events = events.filter(e => e.date === selectedDate);
+    }
+
+    // Type filter
+    const typeChecks = document.querySelectorAll('[data-type]:checked');
+    if (typeChecks.length) {
+        const active = new Set([...typeChecks].map(c => c.dataset.type));
+        events = events.filter(e => active.has(e.type));
+    }
+
+    // Size filter
+    const sizeChecks = document.querySelectorAll('[data-size]:checked');
+    if (sizeChecks.length) {
+        const active = new Set([...sizeChecks].map(c => c.dataset.size));
+        events = events.filter(e => active.has(e.size));
+    }
+
+    return events.sort((a, b) => a.date.localeCompare(b.date) || a.distance - b.distance);
+}
+
+// ── Build date bar ──
+function buildDateBar(eventsInRadius) {
+    const bar = document.getElementById('dateBar');
+    bar.innerHTML = '';
+
+    const dateCounts = {};
+    eventsInRadius.forEach(e => dateCounts[e.date] = (dateCounts[e.date] || 0) + 1);
+    const dates = Object.keys(dateCounts).sort();
+
+    // "Tous" button
+    const allBtn = document.createElement('button');
+    allBtn.className = 'date-btn' + (selectedDate === null ? ' active' : '');
+    allBtn.innerHTML = `Tous <span class="count">${eventsInRadius.length}</span>`;
+    allBtn.onclick = () => { selectedDate = null; updateMap(); };
+    bar.appendChild(allBtn);
+
+    // One button per date
+    dates.forEach(d => {
+        const btn = document.createElement('button');
+        btn.className = 'date-btn' + (selectedDate === d ? ' active' : '');
+        btn.innerHTML = `${dateLabelShort(d)} <span class="count">${dateCounts[d]}</span>`;
+        btn.onclick = () => { selectedDate = (selectedDate === d) ? null : d; updateMap(); };
+        bar.appendChild(btn);
+    });
+}
+
+// ── Build filter panel (types + size only) ──
+function buildFilters(eventsInRadius) {
+    const panel = document.getElementById('filterPanel');
+    const types = {};
+    eventsInRadius.forEach(e => types[e.type] = (types[e.type] || 0) + 1);
+
+    let html = '<h3>Types</h3>';
+    Object.entries(types).sort((a,b) => b[1]-a[1]).forEach(([type, count]) => {
+        const tc = TYPE_COLORS[type] || { color: '#999', label: type };
+        html += `<label><input type="checkbox" checked data-type="${type}">
+            <span class="dot" style="background:${tc.color}"></span> ${tc.label} (${count})</label>`;
+    });
+
+    html += '<hr><h3>Taille</h3>';
+    html += '<label><input type="checkbox" checked data-size="large"> Grande (80+)</label>';
+    html += '<label><input type="checkbox" checked data-size="medium"> Moyenne</label>';
+    html += '<label><input type="checkbox" checked data-size="small"> Petite</label>';
+
+    panel.innerHTML = html;
+    panel.querySelectorAll('input[type="checkbox"]').forEach(cb => cb.addEventListener('change', updateMap));
+}
+
+// ── Update map ──
+function updateMap() {
+    markers.forEach(m => map.removeLayer(m));
+    markers = [];
+    if (radiusCircle) map.removeLayer(radiusCircle);
+    if (centerMarker) map.removeLayer(centerMarker);
+
+    const inRadius = getEventsInRadius();
+    buildDateBar(inRadius);
+    buildFilters(inRadius);
+
+    const visible = getVisible(inRadius);
+
+    // Center
+    centerMarker = L.circleMarker([center.lat, center.lon], {
+        radius: 8, fillColor: '#e94560', fillOpacity: 1, color: '#fff', weight: 3
+    }).addTo(map).bindTooltip(center.name, { permanent: true, direction: 'right', offset: [10, 0] });
+
+    radiusCircle = L.circle([center.lat, center.lon], {
+        radius: radius * 1000, color: '#e94560', weight: 1.5, dashArray: '8,5',
+        fillColor: '#e94560', fillOpacity: 0.04
+    }).addTo(map);
+
+    // Markers
+    visible.forEach(ev => {
+        const tc = TYPE_COLORS[ev.type] || { color: '#999' };
+        const r = ev.size === 'large' ? 11 : ev.size === 'medium' ? 8 : 5;
+
+        const marker = L.circleMarker([ev.lat, ev.lon], {
+            radius: r, fillColor: tc.color, fillOpacity: 0.8, color: '#fff', weight: 1.5
+        }).addTo(map);
+
+        const popup = `
+            <div class="popup-title">${ev.name}</div>
+            <span class="popup-badge" style="background:${tc.color}40;border:1px solid ${tc.color};color:${tc.color}">${ev.type}</span>
+            <span class="popup-badge" style="background:rgba(255,255,255,0.1);border:1px solid #666;color:#ccc;margin-left:4px">${dateLabel(ev.date)}</span>
+            <div class="popup-info">
+                <strong>${ev.city}</strong>${ev.dept ? ' (' + ev.dept + ')' : ''}<br>
+                ${ev.address && ev.address !== ev.city ? ev.address + '<br>' : ''}
+                ${ev.hours ? '<strong>Horaires:</strong> ' + ev.hours + '<br>' : ''}
+                ${ev.exposants ? ev.exposants + '<br>' : ''}
+                ${ev.description ? '<br><em style="color:#999">' + ev.description.substring(0, 200) + '</em>' : ''}
+            </div>
+            <div style="font-size:0.72em;color:#aaa;margin-top:4px">${ev.distance} km de ${center.name}</div>
+            ${ev.link ? '<a href="' + ev.link + '" target="_blank" class="popup-link">Voir le detail</a>' : ''}
+        `;
+        marker.bindPopup(popup, { maxWidth: 320 });
+        markers.push(marker);
+    });
+
+    map.fitBounds(radiusCircle.getBounds(), { padding: [20, 20] });
+
+    document.getElementById('countVisible').textContent = visible.length;
+    document.getElementById('countTotal').textContent = inRadius.length;
+
+    updateList(visible);
+}
+
+// ── List ──
+function updateList(visible) {
+    const panel = document.getElementById('listPanel');
+    let html = `<h3>${visible.length} evenements</h3>`;
+    let lastDate = '';
+    visible.forEach(ev => {
+        if (ev.date !== lastDate) {
+            html += `<div style="font-size:0.75em;font-weight:700;color:#e94560;padding:8px 4px 3px;margin-top:6px;border-bottom:1px solid rgba(233,69,96,0.2)">${dateLabel(ev.date)}</div>`;
+            lastDate = ev.date;
+        }
+        html += `<div class="list-item" onclick="flyTo(${ev.lat},${ev.lon})">
+            <div class="li-name">${ev.name}</div>
+            <div class="li-city">${ev.city}${ev.dept ? ' ('+ev.dept+')' : ''} — ${ev.distance}km</div>
+            <div class="li-meta">${ev.hours || '?'} | ${ev.type}${ev.size === 'large' ? ' (GRAND)' : ''}</div>
+        </div>`;
+    });
+    panel.innerHTML = html;
+}
+
+function flyTo(lat, lon) {
+    map.flyTo([lat, lon], 14, { duration: 0.6 });
+    markers.forEach(m => {
+        const ll = m.getLatLng();
+        if (Math.abs(ll.lat - lat) < 0.001 && Math.abs(ll.lng - lon) < 0.001) {
+            setTimeout(() => m.openPopup(), 700);
+        }
+    });
+}
+
+// ── Toggles ──
+document.getElementById('btnList').addEventListener('click', () => {
+    document.getElementById('listPanel').classList.toggle('active');
+});
+document.getElementById('btnFilters').addEventListener('click', () => {
+    document.getElementById('filterPanel').classList.toggle('active');
+});
+
+// ── Init ──
+loadEvents();
+</script>
+</body>
+</html>
