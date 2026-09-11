@@ -1,6 +1,11 @@
 #!/usr/bin/env python3
 """
-Scraper brocabrac.fr — Toute la France, 14 jours glissants.
+Scraper multi-sources — Toute la France, 14 jours glissants.
+Sources:
+  1. brocabrac.fr       — JSON-LD par departement
+  2. vide-greniers.org  — JSON-LD par departement
+  3. sabradou.com       — HTML par date (Nord/Picardie) + geocodage
+
 Concu pour tourner en cron GitHub Actions (1x/jour).
 Genere public/events.json consomme par le frontend statique.
 """
@@ -20,14 +25,6 @@ from bs4 import BeautifulSoup
 DAYS_AHEAD = 14
 OUTPUT = os.path.join(os.path.dirname(__file__), "..", "public", "events.json")
 
-# Tous les departements metropolitains
-DEPARTMENTS = [
-    f"{i:02d}" for i in range(1, 20)
-] + ["2A", "2B"] + [
-    f"{i}" for i in range(21, 96)
-]
-
-BASE_URL = "https://brocabrac.fr"
 HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -39,6 +36,36 @@ HEADERS = {
 
 SESSION = requests.Session()
 SESSION.headers.update(HEADERS)
+
+# Tous les departements metropolitains (pour brocabrac)
+DEPARTMENTS_NUM = [
+    f"{i:02d}" for i in range(1, 20)
+] + ["2A", "2B"] + [
+    f"{i}" for i in range(21, 96)
+]
+
+# Departements pour vide-greniers.org (nom tel qu'utilise dans l'URL)
+VG_DEPARTMENTS = [
+    "Ain", "Aisne", "Allier", "Alpes-de-Haute-Provence", "Hautes-Alpes",
+    "Alpes-Maritimes", "Ardeche", "Ardennes", "Ariege", "Aube", "Aude",
+    "Aveyron", "Bouches-du-Rhone", "Calvados", "Cantal", "Charente",
+    "Charente-Maritime", "Cher", "Correze", "Cote-d-or", "Cotes-d-Armor",
+    "Creuse", "Dordogne", "Doubs", "Drome", "Eure", "Eure-et-Loir",
+    "Finistere", "Corse-du-Sud", "Haute-Corse", "Gard", "Haute-Garonne",
+    "Gers", "Gironde", "Herault", "Ille-et-Vilaine", "Indre",
+    "Indre-et-Loire", "Isere", "Jura", "Landes", "Loir-et-Cher", "Loire",
+    "Haute-Loire", "Loire-Atlantique", "Loiret", "Lot", "Lot-et-Garonne",
+    "Lozere", "Maine-et-Loire", "Manche", "Marne", "Haute-Marne", "Mayenne",
+    "Meurthe-et-Moselle", "Meuse", "Morbihan", "Moselle", "Nievre", "Nord",
+    "Oise", "Orne", "Pas-de-Calais", "Puy-de-Dome", "Pyrenees-Atlantiques",
+    "Hautes-Pyrenees", "Pyrenees-Orientales", "Bas-Rhin", "Haut-Rhin",
+    "Rhone", "Haute-Saone", "Saone-et-Loire", "Sarthe", "Savoie",
+    "Haute-Savoie", "Paris", "Seine-Maritime", "Seine-et-Marne", "Yvelines",
+    "Deux-Sevres", "Somme", "Tarn", "Tarn-et-Garonne", "Var", "Vaucluse",
+    "Vendee", "Vienne", "Haute-Vienne", "Vosges", "Yonne",
+    "Territoire-de-Belfort", "Essonne", "Hauts-de-Seine", "Seine-Saint-Denis",
+    "Val-de-Marne", "Val-d-Oise",
+]
 
 
 # ── UTILS ────────────────────────────────────────────────────────
@@ -80,7 +107,16 @@ def estimate_size(text):
     return "medium"
 
 
-def parse_hours(start_str, end_str):
+def extract_exposants(text):
+    if not text:
+        return ""
+    m = re.search(r"(\d+)\s*(?:exposant|stand)", text, re.I)
+    if m:
+        return f"~{m.group(1)} exposants"
+    return ""
+
+
+def parse_hours_iso(start_str, end_str):
     try:
         s = datetime.fromisoformat(start_str.replace("Z", "+00:00"))
         e = datetime.fromisoformat(end_str.replace("Z", "+00:00"))
@@ -91,11 +127,91 @@ def parse_hours(start_str, end_str):
         return ""
 
 
-# ── SCRAPING ─────────────────────────────────────────────────────
-def fetch(url, retries=3):
+def parse_hours_text(text):
+    if not text:
+        return ""
+    patterns = [
+        r"(\d{1,2})\s*[hH]\s*(\d{2})?\s*[-/aà]\s*(\d{1,2})\s*[hH]\s*(\d{2})?",
+        r"[Dd]e\s+(\d{1,2})\s*[hH]\s*(\d{2})?\s*[aà]\s*(\d{1,2})\s*[hH]\s*(\d{2})?",
+    ]
+    for pat in patterns:
+        m = re.search(pat, text)
+        if m:
+            g = m.groups()
+            sh = f"{int(g[0])}h" + (g[1] if g[1] else "")
+            eh = f"{int(g[2])}h" + (g[3] if g[3] else "")
+            return f"{sh} - {eh}"
+    return ""
+
+
+def parse_date_iso(s):
+    """Parse YYYY-MM-DD or ISO datetime to date object."""
+    try:
+        return datetime.fromisoformat(s.replace("Z", "+00:00")).date()
+    except ValueError:
+        try:
+            return date.fromisoformat(s[:10])
+        except ValueError:
+            return None
+
+
+def parse_date_fr(s):
+    """Parse DD/MM/YYYY to date object."""
+    try:
+        return datetime.strptime(s.strip(), "%d/%m/%Y").date()
+    except ValueError:
+        return None
+
+
+def date_range(start_date, end_date, date_min, date_max):
+    """Return list of days in [start_date, end_date] intersected with [date_min, date_max]."""
+    days = []
+    d = max(start_date, date_min)
+    last = min(end_date, date_max)
+    while d <= last:
+        days.append(d)
+        d += timedelta(days=1)
+    return days
+
+
+def haversine(lat1, lon1, lat2, lon2):
+    R = 6371
+    dlat = math.radians(lat2 - lat1)
+    dlon = math.radians(lon2 - lon1)
+    a = (math.sin(dlat / 2) ** 2
+         + math.cos(math.radians(lat1)) * math.cos(math.radians(lat2))
+         * math.sin(dlon / 2) ** 2)
+    return R * 2 * math.asin(math.sqrt(a))
+
+
+def make_event(name, city, dept, address, lat, lon, event_date, hours,
+               event_type, size, exposants, description, organizer, link, source):
+    return {
+        "name": name.strip(),
+        "city": city.strip(),
+        "dept": dept.strip(),
+        "address": address.strip(),
+        "lat": round(lat, 5),
+        "lon": round(lon, 5),
+        "date": str(event_date),
+        "hours": hours,
+        "type": event_type,
+        "size": size,
+        "exposants": exposants,
+        "description": (description or "")[:300].strip(),
+        "organizer": organizer,
+        "link": link,
+        "source": source,
+    }
+
+
+# ── HTTP ─────────────────────────────────────────────────────────
+def fetch(url, retries=3, encoding=None):
     for attempt in range(retries):
         try:
             resp = SESSION.get(url, timeout=20)
+            if encoding:
+                resp.encoding = encoding
             if resp.status_code == 200:
                 return resp.text
             if resp.status_code == 429:
@@ -114,10 +230,34 @@ def fetch(url, retries=3):
     return None
 
 
-def scrape_department(dept, date_min, date_max):
-    """Scrape toutes les pages d'un departement, filtre par fenetre de dates."""
+# ── SOURCE 1: BROCABRAC.FR ──────────────────────────────────────
+def scrape_brocabrac(date_min, date_max):
+    print("\n" + "=" * 60)
+    print("SOURCE 1: brocabrac.fr")
+    print("=" * 60)
+    all_events = []
+    errors = []
+
+    for i, dept in enumerate(DEPARTMENTS_NUM):
+        print(f"  [{i+1}/{len(DEPARTMENTS_NUM)}] Dept {dept}...", end=" ", flush=True)
+        try:
+            events = _brocabrac_department(dept, date_min, date_max)
+            print(f"{len(events)} events")
+            all_events.extend(events)
+        except Exception as e:
+            print(f"ERREUR: {e}")
+            errors.append(dept)
+        time.sleep(1.0)
+
+    if errors:
+        print(f"  Erreurs: {', '.join(errors)}")
+    print(f"  TOTAL brocabrac.fr: {len(all_events)}")
+    return all_events
+
+
+def _brocabrac_department(dept, date_min, date_max):
     events = []
-    base_url = f"{BASE_URL}/{dept}"
+    base_url = f"https://brocabrac.fr/{dept}"
     page = 1
     first_event_id = None
 
@@ -128,20 +268,14 @@ def scrape_department(dept, date_min, date_max):
             break
 
         soup = BeautifulSoup(html, "html.parser")
-
-        # Detection de wrap-around via data-event-id
         ev_divs = soup.find_all("div", class_="ev", attrs={"data-event-id": True})
-        if not ev_divs:
-            # Pas de div.ev ? Essayer quand meme les JSON-LD
-            pass
-        else:
+        if ev_divs:
             page_first_id = ev_divs[0].get("data-event-id")
             if page == 1:
                 first_event_id = page_first_id
             elif page_first_id == first_event_id:
-                break  # wrap-around
+                break
 
-        # Extraire JSON-LD
         for script in soup.find_all("script", type="application/ld+json"):
             try:
                 data = json.loads(script.string)
@@ -149,62 +283,35 @@ def scrape_department(dept, date_min, date_max):
                 continue
             if not isinstance(data, dict) or data.get("@type") != "Event":
                 continue
+            events.extend(_brocabrac_process(data, date_min, date_max))
 
-            evs = process_jsonld(data, date_min, date_max)
-            events.extend(evs)
-
-        # Pagination: si moins de 40 resultats, c'est la derniere page
         if len(ev_divs) < 40:
             break
         page += 1
-        if page > 10:  # securite
+        if page > 10:
             break
         time.sleep(0.8)
 
     return events
 
 
-def process_jsonld(data, date_min, date_max):
-    """Convertit un event JSON-LD en liste de dicts (un par jour couvert)."""
+def _brocabrac_process(data, date_min, date_max):
     start = data.get("startDate", "")
     if not start:
         return []
-
-    # Parser start date
-    try:
-        dt = datetime.fromisoformat(start.replace("Z", "+00:00"))
-        start_date = dt.date()
-    except ValueError:
-        try:
-            start_date = date.fromisoformat(start[:10])
-        except ValueError:
-            return []
-
-    # Parser end date (peut etre un autre jour)
-    end_str = data.get("endDate", "")
-    end_date = start_date
-    if end_str:
-        try:
-            edt = datetime.fromisoformat(end_str.replace("Z", "+00:00"))
-            end_date = edt.date()
-        except ValueError:
-            try:
-                end_date = date.fromisoformat(end_str[:10])
-            except ValueError:
-                end_date = start_date
-
-    # Generer la liste de jours couverts (dans la fenetre)
-    event_days = []
-    d = max(start_date, date_min)
-    last = min(end_date, date_max)
-    while d <= last:
-        event_days.append(d)
-        d += timedelta(days=1)
-
-    if not event_days:
+    start_date = parse_date_iso(start)
+    if not start_date:
         return []
 
-    # Skip annules
+    end_str = data.get("endDate", "")
+    end_date = parse_date_iso(end_str) if end_str else start_date
+    if not end_date:
+        end_date = start_date
+
+    days = date_range(start_date, end_date, date_min, date_max)
+    if not days:
+        return []
+
     if "Cancelled" in data.get("eventStatus", ""):
         return []
 
@@ -212,7 +319,6 @@ def process_jsonld(data, date_min, date_max):
     if not name:
         return []
 
-    # Geo
     loc = data.get("location", {})
     geo = loc.get("geo", {})
     try:
@@ -223,7 +329,6 @@ def process_jsonld(data, date_min, date_max):
     if lat == 0 or lon == 0:
         return []
 
-    # Adresse
     addr = loc.get("address", {})
     city = addr.get("addressLocality", "")
     postal = addr.get("postalCode", "")
@@ -231,63 +336,288 @@ def process_jsonld(data, date_min, date_max):
     street = addr.get("streetAddress", "")
     full_addr = f"{street}, {postal} {city}".strip(", ")
 
-    # Horaires
-    hours = parse_hours(start, end_str)
-
-    # Description + organisateur
+    hours = parse_hours_iso(start, end_str)
     desc = (data.get("description") or "").strip()[:300]
     org = data.get("organizer", {})
     organizer = org.get("name", "") if isinstance(org, dict) else str(org) if org else ""
-
-    # Type et taille
     combined = f"{name} {desc}"
-    event_type = classify_type(name)
-    size = estimate_size(combined)
 
-    # Exposants
-    exposants = ""
-    m = re.search(r"(\d+)\s*(?:exposant|stand)", combined, re.I)
-    if m:
-        exposants = f"~{m.group(1)} exposants"
-
-    # URL
     event_url = data.get("url", data.get("@id", ""))
     if event_url and not event_url.startswith("http"):
-        event_url = BASE_URL + event_url
+        event_url = "https://brocabrac.fr" + event_url
 
-    # Un event par jour couvert
     results = []
-    for day in event_days:
-        results.append({
-            "name": name,
-            "city": city,
-            "dept": dept,
-            "address": full_addr,
-            "lat": round(lat, 5),
-            "lon": round(lon, 5),
-            "date": str(day),
-            "hours": hours,
-            "type": event_type,
-            "size": size,
-            "exposants": exposants,
-            "description": desc,
-            "organizer": organizer,
-            "link": event_url,
-        })
+    for day in days:
+        results.append(make_event(
+            name=name, city=city, dept=dept, address=full_addr,
+            lat=lat, lon=lon, event_date=day, hours=hours,
+            event_type=classify_type(name), size=estimate_size(combined),
+            exposants=extract_exposants(combined), description=desc,
+            organizer=organizer, link=event_url, source="brocabrac.fr",
+        ))
     return results
 
 
+# ── SOURCE 2: VIDE-GRENIERS.ORG ─────────────────────────────────
+def scrape_videgreniers(date_min, date_max):
+    print("\n" + "=" * 60)
+    print("SOURCE 2: vide-greniers.org")
+    print("=" * 60)
+    all_events = []
+    seen_ids = set()
+    errors = []
+
+    for i, dept_name in enumerate(VG_DEPARTMENTS):
+        print(f"  [{i+1}/{len(VG_DEPARTMENTS)}] {dept_name}...", end=" ", flush=True)
+        try:
+            events, new_ids = _vg_department(dept_name, date_min, date_max, seen_ids)
+            seen_ids.update(new_ids)
+            print(f"{len(events)} events")
+            all_events.extend(events)
+        except Exception as e:
+            print(f"ERREUR: {e}")
+            errors.append(dept_name)
+        time.sleep(1.0)
+
+    if errors:
+        print(f"  Erreurs: {', '.join(errors)}")
+    print(f"  TOTAL vide-greniers.org: {len(all_events)}")
+    return all_events
+
+
+def _vg_department(dept_name, date_min, date_max, seen_ids):
+    events = []
+    new_ids = set()
+    page = 1
+
+    while page <= 8:  # securite
+        url = f"https://vide-greniers.org/evenements/{dept_name}?page={page}"
+        html = fetch(url)
+        if not html:
+            break
+
+        soup = BeautifulSoup(html, "html.parser")
+        page_new = 0
+
+        for script in soup.find_all("script", type="application/ld+json"):
+            try:
+                data = json.loads(script.string)
+            except (json.JSONDecodeError, TypeError):
+                continue
+            if not isinstance(data, dict) or data.get("@type") != "Event":
+                continue
+
+            # Dedup par ID
+            event_id = data.get("@id", data.get("url", ""))
+            m = re.search(r"/(\d+)/", event_id)
+            eid = m.group(1) if m else event_id
+            if eid in seen_ids or eid in new_ids:
+                continue
+            new_ids.add(eid)
+            page_new += 1
+
+            evs = _vg_process(data, date_min, date_max)
+            events.extend(evs)
+
+        # Si aucun nouvel event sur cette page, on arrete
+        if page_new == 0:
+            break
+        page += 1
+        time.sleep(0.8)
+
+    return events, new_ids
+
+
+def _vg_process(data, date_min, date_max):
+    # Dates au format DD/MM/YYYY
+    start_str = data.get("startDate", "")
+    end_str = data.get("endDate", "")
+
+    start_date = parse_date_fr(start_str) or parse_date_iso(start_str)
+    if not start_date:
+        return []
+    end_date = parse_date_fr(end_str) or parse_date_iso(end_str) if end_str else start_date
+    if not end_date:
+        end_date = start_date
+
+    days = date_range(start_date, end_date, date_min, date_max)
+    if not days:
+        return []
+
+    status = data.get("eventStatus", "")
+    if "Cancelled" in status:
+        return []
+
+    name = data.get("name", "").strip()
+    if not name:
+        return []
+
+    loc = data.get("location", {})
+    geo = loc.get("geo", {})
+    try:
+        lat = float(geo.get("latitude", 0))
+        lon = float(geo.get("longitude", 0))
+    except (ValueError, TypeError):
+        return []
+    if lat == 0 or lon == 0:
+        return []
+
+    addr = loc.get("address", {})
+    # addressLocality format: "Ville-45"
+    locality = addr.get("addressLocality", "")
+    parts = locality.rsplit("-", 1)
+    city = parts[0] if parts else locality
+    dept = parts[1] if len(parts) > 1 and parts[1].isdigit() else ""
+
+    venue = loc.get("name", "")
+    full_addr = f"{venue}, {city}" if venue else city
+
+    desc = (data.get("description") or "").strip()[:300]
+    hours = parse_hours_text(desc)
+
+    org = data.get("organizer", {})
+    organizer = org.get("name", "") if isinstance(org, dict) else ""
+
+    combined = f"{name} {desc}"
+    event_url = data.get("url", data.get("@id", ""))
+
+    results = []
+    for day in days:
+        results.append(make_event(
+            name=name, city=city, dept=dept, address=full_addr,
+            lat=lat, lon=lon, event_date=day, hours=hours,
+            event_type=classify_type(name), size=estimate_size(combined),
+            exposants=extract_exposants(combined), description=desc,
+            organizer=organizer, link=event_url, source="vide-greniers.org",
+        ))
+    return results
+
+
+# ── SOURCE 3: SABRADOU.COM ──────────────────────────────────────
+_geocode_cache = {}
+
+
+def _geocode(city, dept_num):
+    """Geocode ville via adresse.data.gouv.fr. Cache en memoire."""
+    key = f"{city}-{dept_num}"
+    if key in _geocode_cache:
+        return _geocode_cache[key]
+
+    query = f"{city}"
+    if dept_num:
+        query += f" {dept_num}"
+    try:
+        resp = requests.get(
+            "https://api-adresse.data.gouv.fr/search/",
+            params={"q": query, "type": "municipality", "limit": 1},
+            timeout=5,
+        )
+        if resp.status_code == 200:
+            data = resp.json()
+            feats = data.get("features", [])
+            if feats:
+                coords = feats[0]["geometry"]["coordinates"]
+                result = (coords[1], coords[0])  # lat, lon
+                _geocode_cache[key] = result
+                return result
+    except Exception:
+        pass
+    _geocode_cache[key] = None
+    return None
+
+
+def scrape_sabradou(date_min, date_max):
+    print("\n" + "=" * 60)
+    print("SOURCE 3: sabradou.com")
+    print("=" * 60)
+    all_events = []
+
+    # Generer les dates a scraper (format YYMMDD)
+    d = date_min
+    dates_to_scrape = []
+    while d <= date_max:
+        dates_to_scrape.append(d)
+        d += timedelta(days=1)
+
+    for target_date in dates_to_scrape:
+        page_code = target_date.strftime("%y%m%d")
+        url = f"https://www.sabradou.com/?page={page_code}"
+        print(f"  [{target_date}] {url}...", end=" ", flush=True)
+
+        html = fetch(url, encoding="iso-8859-1")
+        if not html:
+            print("skip")
+            continue
+
+        soup = BeautifulSoup(html, "html.parser")
+        count = 0
+
+        # Parcourir les blocs departement
+        for section in soup.find_all("div", class_=["deptardt", "dept"]):
+            # Extraire le departement du titre
+            titre = section.find("li", class_="deptardt-titre")
+            dept_num = ""
+            if titre:
+                m = re.match(r"(\d{2})", titre.get_text(strip=True))
+                if m:
+                    dept_num = m.group(1)
+
+            for li in section.find_all("li"):
+                if "deptardt-titre" in li.get("class", []):
+                    continue
+                a = li.find("a", href=True)
+                if not a:
+                    continue
+
+                # Skip annule
+                if li.find("span", class_="rouge"):
+                    continue
+
+                city_text = a.get_text(strip=True)
+                event_type_text = a.get("title", "brocante")
+                link = a["href"]
+                if not link.startswith("http"):
+                    link = "https://www.sabradou.com" + link
+
+                # Pour "autres", le texte a le dept en prefixe: "01 Saint Jean"
+                if not dept_num:
+                    m = re.match(r"(\d{2})\s+(.+)", city_text)
+                    if m:
+                        dept_num = m.group(1)
+                        city_text = m.group(2)
+
+                # Geocoder la ville
+                geo = _geocode(city_text, dept_num)
+                if not geo:
+                    continue
+                lat, lon = geo
+
+                # Type depuis le texte apres <br/>
+                type_raw = event_type_text or "brocante"
+                # Texte supplementaire dans le li
+                li_text = li.get_text(" ", strip=True)
+
+                ev = make_event(
+                    name=f"{type_raw.capitalize()} - {city_text}",
+                    city=city_text, dept=dept_num, address=city_text,
+                    lat=lat, lon=lon, event_date=target_date, hours="",
+                    event_type=classify_type(type_raw),
+                    size=estimate_size(li_text),
+                    exposants=extract_exposants(li_text),
+                    description="", organizer="", link=link,
+                    source="sabradou.com",
+                )
+                all_events.append(ev)
+                count += 1
+
+        print(f"{count} events")
+        time.sleep(0.8)
+
+    print(f"  TOTAL sabradou.com: {len(all_events)}")
+    return all_events
+
+
 # ── DEDUP ────────────────────────────────────────────────────────
-def haversine(lat1, lon1, lat2, lon2):
-    R = 6371
-    dlat = math.radians(lat2 - lat1)
-    dlon = math.radians(lon2 - lon1)
-    a = (math.sin(dlat / 2) ** 2
-         + math.cos(math.radians(lat1)) * math.cos(math.radians(lat2))
-         * math.sin(dlon / 2) ** 2)
-    return R * 2 * math.asin(math.sqrt(a))
-
-
 def dedup_events(events):
     unique = []
     for ev in events:
@@ -300,7 +630,6 @@ def dedup_events(events):
             dist = haversine(ev["lat"], ev["lon"], existing["lat"], existing["lon"])
             if dist < 0.5 and ev["type"] == existing["type"]:
                 is_dup = True
-                # Garder la meilleure description
                 if len(ev.get("description", "")) > len(existing.get("description", "")):
                     existing["description"] = ev["description"]
                 if ev["hours"] and not existing["hours"]:
@@ -321,42 +650,35 @@ def main():
     date_max = today + timedelta(days=DAYS_AHEAD)
 
     print("=" * 60)
-    print("SCRAPER BROCABRAC.FR — France entiere")
+    print("SCRAPER MULTI-SOURCES — France entiere")
     print(f"  Fenetre: {date_min} -> {date_max} ({DAYS_AHEAD} jours)")
-    print(f"  Departements: {len(DEPARTMENTS)}")
     print(f"  Output: {OUTPUT}")
     print("=" * 60)
 
-    all_events = []
-    errors = []
+    events_1 = scrape_brocabrac(date_min, date_max)
+    events_2 = scrape_videgreniers(date_min, date_max)
+    events_3 = scrape_sabradou(date_min, date_max)
 
-    for i, dept in enumerate(DEPARTMENTS):
-        print(f"\n[{i+1}/{len(DEPARTMENTS)}] Dept {dept}...", end=" ", flush=True)
-        try:
-            events = scrape_department(dept, date_min, date_max)
-            print(f"{len(events)} events")
-            all_events.extend(events)
-        except Exception as e:
-            print(f"ERREUR: {e}")
-            errors.append(dept)
-        time.sleep(1.0)
-
+    all_events = events_1 + events_2 + events_3
     print(f"\n{'=' * 60}")
-    print(f"Total brut: {len(all_events)} events")
+    print(f"TOTAL BRUT: {len(all_events)}")
+    print(f"  brocabrac.fr:      {len(events_1)}")
+    print(f"  vide-greniers.org: {len(events_2)}")
+    print(f"  sabradou.com:      {len(events_3)}")
 
-    # Dedup
     all_events = dedup_events(all_events)
-    print(f"Apres dedup: {len(all_events)} events")
+    print(f"APRES DEDUP: {len(all_events)}")
 
-    # Tri par date
     all_events.sort(key=lambda e: e["date"])
 
     # Stats
     dates_count = {}
     types_count = {}
+    sources_count = {}
     for ev in all_events:
         dates_count[ev["date"]] = dates_count.get(ev["date"], 0) + 1
         types_count[ev["type"]] = types_count.get(ev["type"], 0) + 1
+        sources_count[ev["source"]] = sources_count.get(ev["source"], 0) + 1
 
     print("\nPar date:")
     for d, c in sorted(dates_count.items()):
@@ -364,9 +686,9 @@ def main():
     print("\nPar type:")
     for t, c in sorted(types_count.items(), key=lambda x: -x[1]):
         print(f"  {t}: {c}")
-
-    if errors:
-        print(f"\nErreurs sur: {', '.join(errors)}")
+    print("\nPar source:")
+    for s, c in sorted(sources_count.items(), key=lambda x: -x[1]):
+        print(f"  {s}: {c}")
 
     # Ecrire le JSON
     output = {
@@ -374,6 +696,7 @@ def main():
         "date_min": str(date_min),
         "date_max": str(date_max),
         "total": len(all_events),
+        "sources": ["brocabrac.fr", "vide-greniers.org", "sabradou.com"],
         "events": all_events,
     }
 
