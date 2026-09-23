@@ -667,6 +667,7 @@ def main():
     print(f"  sabradou.com:      {len(events_3)}")
 
     all_events = dedup_events(all_events)
+    all_events = [e for e in all_events if e["date"] >= str(today)]
     print(f"APRES DEDUP: {len(all_events)}")
 
     all_events.sort(key=lambda e: e["date"])

@@ -333,7 +333,8 @@ async function loadEvents() {
         const resp = await fetch('events.json');
         if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
         const data = await resp.json();
-        ALL_EVENTS = data.events || [];
+        const today = new Date().toISOString().slice(0, 10);
+        ALL_EVENTS = (data.events || []).filter(e => e.date >= today);
         const scraped = data.scraped_at ? new Date(data.scraped_at) : null;
         if (scraped) {
             document.getElementById('freshness').textContent =
